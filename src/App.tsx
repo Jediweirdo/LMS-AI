@@ -4,9 +4,11 @@ import AppLayout from './layouts/AppLayout';
 import Dashboard from './pages/Dashboard';
 import CourseProgress from './pages/CourseProgress';
 import ProjectHub from './pages/ProjectHub';
+import ProjectLibrary from './pages/ProjectLibrary';
 import ProjectDetail from './pages/ProjectDetail';
 import ProjectMentor from './pages/ProjectMentor';
 import Mentor from './pages/Mentor';
+import DeliverableCalendar from './pages/DeliverableCalendar';
 import Settings from './pages/Settings';
 import Setup from './pages/Setup';
 import { initializeAllStores, useIsAppLoading } from './store/hooks';
@@ -73,6 +75,8 @@ function App() {
           <Route path="/project" element={<ProjectHub />} />
           <Route path="/project/:projectId" element={<ProjectDetail />} />
           <Route path="/project/:projectId/mentor" element={<ProjectMentor />} />
+          <Route path="/projects" element={<ProjectLibrary />} />
+          <Route path="/calendar" element={<DeliverableCalendar />} />
           <Route path="/mentor" element={<Mentor />} />
           <Route path="/settings" element={<Settings />} />
         </Route>

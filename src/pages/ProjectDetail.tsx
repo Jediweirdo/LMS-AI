@@ -5,9 +5,11 @@ import {
   ChevronDown, ChevronUp, Target, Wrench, Package, Calendar, MessageCircle, ArrowLeft,
 } from 'lucide-react';
 import { useStudentStore } from '../store/studentStore';
+import { usePreferencesStore } from '../store/preferencesStore';
 import { COURSE_PROGRAMS } from '../data/coursePrograms';
 import clsx from 'clsx';
 import { useState } from 'react';
+import { formatReadableDate } from '../utils/dateFormat';
 
 const container = { hidden: { opacity: 0 }, show: { opacity: 1, transition: { staggerChildren: 0.06 } } };
 const item = { hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transition: { duration: 0.4 } } };
@@ -15,6 +17,10 @@ const item = { hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transiti
 export default function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
   const student = useStudentStore((s) => s.student);
+  const { language, dateFormat } = usePreferencesStore((s) => ({
+    language: s.language,
+    dateFormat: s.dateFormat,
+  }));
   const project = student.projects.find((p) => p.id === projectId);
 
   const [expandedMilestone, setExpandedMilestone] = useState<string | null>(
@@ -189,7 +195,14 @@ export default function ProjectDetail() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-slate-900">{ms.title}</p>
                       <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
-                        <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />{ms.dueDate ? new Date(ms.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'TBD'}</span>
+                        <span className="flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          {formatReadableDate(ms.dueDate, {
+                            locale: language,
+                            dateFormat,
+                            includeYear: dateFormat === 'long',
+                          })}
+                        </span>
                         <span className="flex items-center gap-1"><Clock className="w-3 h-3" />~{ms.estimatedHours}h</span>
                       </div>
                     </div>

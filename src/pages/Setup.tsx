@@ -7,6 +7,8 @@ import { useCourseStore } from '../store/courseStore';
 import { getCanvasUser, getCanvasCourses } from '../services/canvasService';
 import { useProjectStore } from '../store/projectStore';
 import { COURSE_PROGRAMS } from '../data/coursePrograms';
+import { toDateOnlyString } from '../utils/dateFormat';
+import asuLogoFull from '../assets/branding/asu-logo-full.png';
 
 const container = {
   hidden: { opacity: 0 },
@@ -83,6 +85,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
           completedAt: w.completedAt,
         })),
       });
+      // handleFinishSetup();
     }
 
     // Seed a single example project tied to the first catalog course
@@ -94,7 +97,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
         createdAt: new Date().toISOString(),
         selectedCourseIds: [primary.id],
         title: `${primary.title} Capstone`,
-        context: `An integrative capstone project based on ${primary.code} – ${primary.title}.`,
+        context: `An integrative capstone project based on ${primary.code} - ${primary.title}.`,
         problemStatement:
           'Design and implement a realistic engineering project that demonstrates mastery of the course learning outcomes.',
         totalEstimatedHours: 60,
@@ -122,7 +125,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
             title: 'Project Definition',
             description:
               'Clarify the problem, context, constraints, and success criteria for the capstone.',
-            dueDate: new Date().toISOString(),
+            dueDate: toDateOnlyString(),
             status: 'in-progress',
             estimatedHours: 8,
             deliverables: ['Problem definition', 'Initial requirements list'],
@@ -133,7 +136,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
       });
     }
 
-    alert('Template test data added from the course catalog.');
+    completeSetupFlow();
   };
 
   const [currentStep, setCurrentStep] = useState<SetupStep>('welcome');
@@ -145,6 +148,14 @@ export default function Setup({ onComplete }: SetupPageProps) {
   });
   const navigate = useNavigate();
   const isLoading = useIsAppLoading();
+
+  const completeSetupFlow = () => {
+    localStorage.setItem('lms-setup-complete', 'true');
+    if (onComplete) {
+      onComplete();
+    }
+    navigate('/');
+  };
 
   // Canvas API key for setup
   const [canvasApiKey, setCanvasApiKey] = useState('');
@@ -198,10 +209,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
       console.error('Failed saving setup data', err);
     }
 
-    if (onComplete) {
-      onComplete();
-    }
-    navigate('/');
+    completeSetupFlow();
   };
 
   if (isLoading) {
@@ -236,6 +244,11 @@ export default function Setup({ onComplete }: SetupPageProps) {
           {currentStep === 'welcome' && (
             <motion.div variants={item} className="text-center text-white space-y-8">
               <div>
+                <div className="mb-5 flex justify-center">
+                  <div className="bg-white rounded-xl px-4 py-2 shadow-lg">
+                    <img src={asuLogoFull} alt="Arizona State University" className="h-6 w-auto object-contain" />
+                  </div>
+                </div>
                 <motion.div
                   initial={{ scale: 0 }}
                   animate={{ scale: 1 }}
@@ -248,7 +261,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
                   className="text-4xl font-bold mb-4"
                   style={{ fontFamily: "'Space Grotesk', sans-serif" }}
                 >
-                  Welcome to AdaptLearn
+                  Welcome to ProjectForge Studio
                 </h1>
                 <p className="text-xl text-white/80">
                   Let's set up your learning profile to get started
@@ -321,7 +334,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
             <motion.div variants={item} className="bg-white rounded-2xl shadow-2xl p-8 space-y-6">
               <div>
                 <h2 className="text-2xl font-bold text-slate-900">Setup Your Profile</h2>
-                <p className="text-slate-600 mt-1">Enter your course information</p>
+                <p className="text-slate-600 mt-1">Enter your information</p>
               </div>
 
               <div className="space-y-4">
@@ -354,36 +367,7 @@ export default function Setup({ onComplete }: SetupPageProps) {
                     className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
                   />
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-900 mb-2">
-                    Course Name
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Introduction to Mechatronics Engineering"
-                    value={setupData.course}
-                    onChange={(e) =>
-                      setSetupData((prev) => ({ ...prev, course: e.target.value }))
-                    }
-                    className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-900 mb-2">Email</label>
-                  <input
-                    type="email"
-                    placeholder="alex@university.edu"
-                    value={setupData.email}
-                    onChange={(e) =>
-                      setSetupData((prev) => ({ ...prev, email: e.target.value }))
-                    }
-                    className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
-                  />
-                </div>
               </div>
-
               <button
                 onClick={handleFinishSetup}
                 className="w-full py-3 px-6 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 transition-all duration-200"

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStudentStore } from '../store/studentStore';
+import { usePreferencesStore } from '../store/preferencesStore';
 import { useCourseStore } from '../store/courseStore';
 import { useProfile } from '../store/hooks';
 import { COURSE_PROGRAMS } from '../data/coursePrograms';
@@ -47,8 +48,34 @@ const COLOR_MAP: Record<string, { bg: string; text: string; border: string; ligh
   rose: { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', light: 'bg-rose-100' },
 };
 
+function playUiChime(success: boolean): void {
+  const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return;
+
+  const ctx = new AudioCtx();
+  const gain = ctx.createGain();
+  gain.gain.value = 0.02;
+  gain.connect(ctx.destination);
+
+  const now = ctx.currentTime;
+  const sequence = success ? [523.25, 659.25, 783.99] : [392.0, 329.63, 261.63];
+  sequence.forEach((freq, idx) => {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+    osc.connect(gain);
+    osc.start(now + idx * 0.08);
+    osc.stop(now + idx * 0.08 + 0.07);
+  });
+
+  setTimeout(() => {
+    void ctx.close();
+  }, 450);
+}
+
 export default function ProjectHub() {
   const student = useStudentStore((s) => s.student);
+  const soundEnabled = usePreferencesStore((s) => s.soundEnabled);
   const addProject = useStudentStore((s) => s.addProject);
   const deleteProject = useStudentStore((s) => s.deleteProject);
   const isGenerating = useStudentStore((s) => s.isGeneratingProject);
@@ -178,12 +205,15 @@ export default function ProjectHub() {
 
       if (!result.length) {
         setGenError('No candidates were produced. Try relaxing your constraints.');
+        if (soundEnabled) playUiChime(false);
       } else {
         setCandidates(result);
+        if (soundEnabled) playUiChime(true);
       }
     } catch (err) {
       console.error(err);
       setGenError(getAIErrorMessage(err, 'Failed to generate project candidates.'));
+      if (soundEnabled) playUiChime(false);
     } finally {
       clearInterval(interval);
       setIsGenerating(false);
@@ -201,6 +231,7 @@ export default function ProjectHub() {
     customPrompt,
     student,
     profile,
+    soundEnabled,
     resolveCanvasCourseIds,
     setIsGenerating,
   ]);

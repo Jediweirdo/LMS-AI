@@ -1,18 +1,27 @@
 import { motion } from 'framer-motion';
+import { useEffect, useMemo } from 'react';
 import {
   TrendingUp, TrendingDown, Minus, Calendar, Clock, Target,
   Zap, Award, BookOpen, AlertCircle, FolderOpen, Rocket,
 } from 'lucide-react';
 import { useStudentStore } from '../store/studentStore';
+import { usePreferencesStore } from '../store/preferencesStore';
 import { COURSE_PROGRAMS } from '../data/coursePrograms';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
+import { formatReadableDate, parseDateInput } from '../utils/dateFormat';
 
 const container = { hidden: { opacity: 0 }, show: { opacity: 1, transition: { staggerChildren: 0.08 } } };
 const item = { hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.25, 0.46, 0.45, 0.94] } } };
 
 export default function Dashboard() {
   const student = useStudentStore((s) => s.student);
+  const { notifications, reminderWindowDays, language, dateFormat } = usePreferencesStore((s) => ({
+    notifications: s.notifications,
+    reminderWindowDays: s.reminderWindowDays,
+    language: s.language,
+    dateFormat: s.dateFormat,
+  }));
   const enrolledCourses = COURSE_PROGRAMS.filter((c) => student.enrolledCourseIds.includes(c.id));
 
   const allSkills = enrolledCourses.flatMap((c) => c.skills);
@@ -33,6 +42,55 @@ export default function Dashboard() {
   const nextMilestone = student.projects
     .flatMap((p) => p.brief.milestones.map((m) => ({ ...m, projectTitle: p.brief.title, projectId: p.id })))
     .find((m) => m.status === 'in-progress' || m.status === 'upcoming');
+
+  const dueSoonMilestones = useMemo(() => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const max = today.getTime() + reminderWindowDays * 24 * 60 * 60 * 1000;
+
+    return student.projects
+      .flatMap((project) =>
+        project.brief.milestones
+          .filter((milestone) => milestone.status !== 'completed')
+          .map((milestone) => ({
+            ...milestone,
+            projectTitle: project.brief.title,
+            projectId: project.id,
+          })),
+      )
+      .filter((milestone) => {
+        const parsed = parseDateInput(milestone.dueDate);
+        if (!parsed) return false;
+        const due = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()).getTime();
+        return due >= today.getTime() && due <= max;
+      })
+      .sort((a, b) => {
+        const aTime = parseDateInput(a.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const bTime = parseDateInput(b.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        return aTime - bTime;
+      });
+  }, [student.projects, reminderWindowDays]);
+
+  useEffect(() => {
+    if (!notifications || dueSoonMilestones.length === 0) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const notifiedKey = `lms_due_notification_${todayKey}`;
+    if (localStorage.getItem(notifiedKey)) return;
+
+    const nearest = dueSoonMilestones[0];
+    const dueLabel = formatReadableDate(nearest.dueDate, {
+      locale: language,
+      dateFormat,
+      includeYear: dateFormat === 'long',
+    });
+
+    new Notification('Milestones Due Soon', {
+      body: `${dueSoonMilestones.length} milestone(s) due in the next ${reminderWindowDays} day(s). Next: ${nearest.title} on ${dueLabel}.`,
+    });
+    localStorage.setItem(notifiedKey, '1');
+  }, [notifications, dueSoonMilestones, reminderWindowDays, language, dateFormat]);
 
   return (
     <motion.div variants={container} initial="hidden" animate="show" className="space-y-6">
@@ -123,7 +181,7 @@ export default function Dashboard() {
           {nextMilestone && (
             <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm">
               <h3 className="text-base font-semibold text-slate-900 mb-4" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Next Milestone</h3>
-              <div className="space-y-3">
+          <div className="space-y-3">
                 <div className="flex items-start gap-3">
                   <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <Calendar className="w-4 h-4" />
@@ -137,7 +195,11 @@ export default function Dashboard() {
                 <div className="flex items-center gap-4 text-xs text-slate-500">
                   <span className="flex items-center gap-1">
                     <Calendar className="w-3.5 h-3.5" />
-                    Due: {nextMilestone.dueDate ? new Date(nextMilestone.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'TBD'}
+                    Due: {formatReadableDate(nextMilestone.dueDate, {
+                      locale: language,
+                      dateFormat,
+                      includeYear: dateFormat === 'long',
+                    })}
                   </span>
                   <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" />~{nextMilestone.estimatedHours}h</span>
                 </div>
@@ -150,6 +212,22 @@ export default function Dashboard() {
           )}
 
           <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm">
+            {notifications && dueSoonMilestones.length > 0 && (
+              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                <p className="text-xs font-semibold text-amber-800">
+                  {dueSoonMilestones.length} milestone(s) due within {reminderWindowDays} day(s)
+                </p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  Next: {dueSoonMilestones[0].title} (
+                  {formatReadableDate(dueSoonMilestones[0].dueDate, {
+                    locale: language,
+                    dateFormat,
+                    includeYear: dateFormat === 'long',
+                  })}
+                  )
+                </p>
+              </div>
+            )}
             <h3 className="text-base font-semibold text-slate-900 mb-4" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Active Projects</h3>
             {student.projects.length === 0 ? (
               <div className="text-center py-4">

@@ -4,22 +4,26 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
   BookOpen,
-  Rocket,
   MessageCircle,
   Menu,
   X,
-  GraduationCap,
   ChevronRight,
+  Folder,
+  CalendarDays,
   FolderOpen,
   Settings,
 } from 'lucide-react';
 import { useStudentStore } from '../store/studentStore';
 import clsx from 'clsx';
+import asuLogoShort from '../assets/branding/asu-logo-short.png';
+import asuLogoFull from '../assets/branding/asu-logo-full.png';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/course', icon: BookOpen, label: 'Course Progress' },
   { to: '/project', icon: FolderOpen, label: 'My Projects' },
+  { to: '/projects', icon: Folder, label: 'Project Library' },
+  { to: '/calendar', icon: CalendarDays, label: 'Milestone Calendar' },
   { to: '/mentor', icon: MessageCircle, label: 'AI Mentors' },
 ];
 
@@ -27,6 +31,7 @@ export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const student = useStudentStore((s) => s.student);
   const location = useLocation();
+  const isProjectRoute = location.pathname === '/project' || location.pathname.startsWith('/project/');
 
   const getPageTitle = () => {
     if (location.pathname.startsWith('/project/') && location.pathname.endsWith('/mentor')) return 'Project Mentor';
@@ -49,14 +54,9 @@ export default function AppLayout() {
       )} style={{ background: 'var(--color-sidebar)' }}>
         <div className="flex items-center justify-between px-6 py-5 border-b border-white/10">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30">
-              <GraduationCap className="w-5 h-5 text-white" />
-            </div>
             <div>
-              <h1 className="text-white font-semibold text-lg leading-tight tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
-                AdaptLearn
-              </h1>
-              <p className="text-slate-400 text-xs">AI Project Generator</p>
+              <img src={asuLogoFull} alt="Arizona State University" className="h-5 w-auto object-contain" />
+              <p className="font-semibold text-slate-400 text-xs mt-1">ProjectForge Studio</p>
             </div>
           </div>
           <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-slate-400 hover:text-white">
@@ -94,14 +94,14 @@ export default function AppLayout() {
             <NavLink key={item.to} to={item.to} end={item.to === '/'} onClick={() => setSidebarOpen(false)}
               className={({ isActive }) => clsx(
                 'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 group',
-                (isActive || (item.to === '/project' && location.pathname.startsWith('/project')))
+                (isActive || (item.to === '/project' && isProjectRoute))
                   ? 'bg-white/10 text-white shadow-lg shadow-black/10'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
               )}>
               {({ isActive }) => (
                 <>
                   <item.icon className={clsx('w-5 h-5 transition-colors',
-                    (isActive || (item.to === '/project' && location.pathname.startsWith('/project')))
+                    (isActive || (item.to === '/project' && isProjectRoute))
                       ? 'text-indigo-400' : 'text-slate-500 group-hover:text-slate-300')} />
                   <span className="flex-1">{item.label}</span>
                   {item.to === '/project' && student.projects.length > 0 && (
@@ -109,7 +109,7 @@ export default function AppLayout() {
                       {student.projects.length}
                     </span>
                   )}
-                  {(isActive || (item.to === '/project' && location.pathname.startsWith('/project'))) && (
+                  {(isActive || (item.to === '/project' && isProjectRoute)) && (
                     <ChevronRight className="w-4 h-4 text-indigo-400" />
                   )}
                 </>

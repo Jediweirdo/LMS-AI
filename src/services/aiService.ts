@@ -7,10 +7,15 @@ import type {
 } from '../types/student';
 import type { CanvasGenerationContext } from './canvasService';
 import { getCoursesByIds } from '../data/coursePrograms';
+import {
+  getAIConfigSnapshot,
+  setGroqActiveModel,
+  updateGroqRateTelemetry,
+} from '../store/aiConfigStore';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY as string | undefined;
-const MODEL = 'llama-3.3-70b-versatile';
+const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 const GROQ_MAX_RETRIES = 4;
 const GROQ_BASE_BACKOFF_MS = 1200;
 
@@ -78,39 +83,161 @@ function parseRetryAfterMs(header: string | null): number {
   return delta > 0 ? delta : 0;
 }
 
-async function callGroq(messages: GroqMessage[], temperature = 0.7, maxTokens = 2048): Promise<string> {
-  if (!GROQ_API_KEY) {
-    throw new Error('Missing VITE_GROQ_API_KEY environment variable');
+function parseHeaderNumber(headers: Headers, headerNames: string[]): number | null {
+  for (const name of headerNames) {
+    const raw = headers.get(name);
+    if (!raw) continue;
+    const normalised = raw.trim();
+    const parsed = Number(normalised);
+    if (Number.isFinite(parsed)) return parsed;
+    if (!/^-?\d/.test(normalised)) continue;
+    const numericToken = normalised.match(/-?\d+(?:\.\d+)?/);
+    if (!numericToken) continue;
+    const tokenParsed = Number(numericToken[0]);
+    if (Number.isFinite(tokenParsed)) return tokenParsed;
   }
+  return null;
+}
+
+function parseRateResetMs(headers: Headers): number {
+  const seconds = parseHeaderNumber(headers, [
+    'x-ratelimit-reset',
+    'x-ratelimit-reset-requests',
+    'x-ratelimit-reset-tokens',
+    'x-ratelimit-reset-day',
+    'x-ratelimit-reset-tpd',
+    'x-ratelimit-reset-tokens-day',
+    'x-ratelimit-reset-requests-day',
+    'x-ratelimit-reset-requests-per-day',
+  ]);
+  if (typeof seconds === 'number' && seconds > 0) {
+    return Math.ceil(seconds * 1000);
+  }
+  const resetDate = headers.get('x-ratelimit-reset-date');
+  if (!resetDate) return 0;
+  const parsedDate = Date.parse(resetDate);
+  if (!Number.isFinite(parsedDate)) return 0;
+  const delta = parsedDate - Date.now();
+  return delta > 0 ? delta : 0;
+}
+
+function extractGroqTpdTelemetry(headers: Headers): {
+  tpdLimit: number | null;
+  tpdRemaining: number | null;
+} {
+  // Groq header variants differ by model/endpoint; prefer explicit token/day headers first.
+  const tpdLimit = parseHeaderNumber(headers, [
+    'x-ratelimit-limit-tpd',
+    'x-ratelimit-limit-tokens-day',
+    'x-ratelimit-limit-day',
+    'x-ratelimit-limit-tokens',
+    'x-ratelimit-limit-requests-day',
+    'x-ratelimit-limit-requests-per-day',
+    'x-ratelimit-limit-requests',
+  ]);
+  const tpdRemaining = parseHeaderNumber(headers, [
+    'x-ratelimit-remaining-tpd',
+    'x-ratelimit-remaining-tokens-day',
+    'x-ratelimit-remaining-day',
+    'x-ratelimit-remaining-tokens',
+    'x-ratelimit-remaining-requests-day',
+    'x-ratelimit-remaining-requests-per-day',
+    'x-ratelimit-remaining-requests',
+  ]);
+  return { tpdLimit, tpdRemaining };
+}
+
+function isDailyQuotaExceeded(body: string, tpdRemaining: number | null): boolean {
+  if (typeof tpdRemaining === 'number' && tpdRemaining <= 0) return true;
+  return /tpd|daily token|tokens per day|quota exceeded|limit.*day/i.test(body);
+}
+
+function telemetryHasSignals(telemetry: {
+  tpdLimit: number | null;
+  tpdRemaining: number | null;
+}): boolean {
+  return typeof telemetry.tpdLimit === 'number' || typeof telemetry.tpdRemaining === 'number';
+}
+
+async function callGroq(messages: GroqMessage[], temperature = 0.7, maxTokens = 2048): Promise<string> {
+  const config = getAIConfigSnapshot();
+  const apiKey = (config.userGroqApiKey || GROQ_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('No Groq API key set. Add one in Settings or via VITE_GROQ_API_KEY.');
+  }
+  let modelInUse = config.selectedModel || DEFAULT_GROQ_MODEL;
+  const fallbackModel = config.fallbackModel || DEFAULT_GROQ_MODEL;
+  let canAutoFallback =
+    config.autoFallbackToCompletions &&
+    fallbackModel.trim().length > 0 &&
+    fallbackModel !== modelInUse;
+  setGroqActiveModel(modelInUse);
 
   let lastError = '';
   let lastRateLimitWaitMs = 0;
   for (let attempt = 0; attempt <= GROQ_MAX_RETRIES; attempt += 1) {
     const res = await fetch(GROQ_API_URL, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: MODEL,
+        model: modelInUse,
         messages,
         temperature,
         max_tokens: maxTokens,
         stream: false,
       }),
     });
+    const headerRetryAfterMs = parseRetryAfterMs(res.headers.get('retry-after'));
+    const resetRetryAfterMs = parseRateResetMs(res.headers);
+    const retryAfterMs = Math.max(headerRetryAfterMs, resetRetryAfterMs);
+    const tpdTelemetry = extractGroqTpdTelemetry(res.headers);
+    const telemetryPatch: {
+      tpdLimit?: number;
+      tpdRemaining?: number;
+      retryAfterSeconds: number | null;
+      updatedAt: string;
+    } = {
+      retryAfterSeconds: retryAfterMs > 0 ? Math.ceil(retryAfterMs / 1000) : null,
+      updatedAt: new Date().toISOString(),
+    };
+    if (typeof tpdTelemetry.tpdLimit === 'number') {
+      telemetryPatch.tpdLimit = tpdTelemetry.tpdLimit;
+    }
+    if (typeof tpdTelemetry.tpdRemaining === 'number') {
+      telemetryPatch.tpdRemaining = tpdTelemetry.tpdRemaining;
+    }
+    updateGroqRateTelemetry(modelInUse, telemetryPatch);
+    if (!telemetryHasSignals(tpdTelemetry) && modelInUse !== config.selectedModel) {
+      // Keep selected-model card alive when fallback path is active and headers are sparse.
+      updateGroqRateTelemetry(config.selectedModel, {
+        retryAfterSeconds: retryAfterMs > 0 ? Math.ceil(retryAfterMs / 1000) : null,
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     if (res.ok) {
+      setGroqActiveModel(modelInUse);
       const data = await res.json();
       return data.choices?.[0]?.message?.content ?? '';
     }
 
     const body = await res.text();
     lastError = `Groq API ${res.status}: ${body}`;
-    const retryAfterMs = parseRetryAfterMs(res.headers.get('retry-after'));
     const jitter = Math.floor(Math.random() * 300);
     const fallbackBackoff = GROQ_BASE_BACKOFF_MS * 2 ** attempt + jitter;
     const waitMs = Math.max(retryAfterMs, fallbackBackoff);
     if (res.status === 429) {
       lastRateLimitWaitMs = Math.max(lastRateLimitWaitMs, waitMs);
+    }
+    if (
+      res.status === 429 &&
+      canAutoFallback &&
+      isDailyQuotaExceeded(body, tpdTelemetry.tpdRemaining)
+    ) {
+      modelInUse = fallbackModel;
+      canAutoFallback = false;
+      setGroqActiveModel(modelInUse);
+      continue;
     }
 
     const retryable = res.status === 429 || (res.status >= 500 && res.status <= 599);
@@ -152,8 +279,40 @@ function clamp(num: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, num));
 }
 
-function todayPlusDays(days: number): string {
-  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function startOfLocalDay(date = new Date()): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function formatDateOnly(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function parseDateOnly(value: unknown): Date | null {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(year, month - 1, day);
+  if (
+    Number.isNaN(parsed.getTime()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
 }
 
 function extractJsonBlock(raw: string): string {
@@ -164,24 +323,85 @@ function extractJsonBlock(raw: string): string {
   return trimmed;
 }
 
-function parseJsonLoose<T>(raw: string): T {
-  const cleaned = extractJsonBlock(raw);
+function tryParseJson<T>(value: string): T | null {
   try {
-    return JSON.parse(cleaned) as T;
+    return JSON.parse(value) as T;
   } catch {
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as T;
+    return null;
+  }
+}
+
+function extractBalancedJsonCandidate(
+  source: string,
+  startIndex: number,
+): { value: string; endIndex: number } | null {
+  const opener = source[startIndex];
+  const closer = opener === '{' ? '}' : opener === '[' ? ']' : '';
+  if (!closer) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < source.length; i += 1) {
+    const char = source[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
     }
 
-    const firstBracket = cleaned.indexOf('[');
-    const lastBracket = cleaned.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
-      return JSON.parse(cleaned.slice(firstBracket, lastBracket + 1)) as T;
+    if (char === '"') {
+      inString = true;
+      continue;
     }
-    throw new Error('Could not parse JSON response from model');
+
+    if (char === opener) {
+      depth += 1;
+      continue;
+    }
+
+    if (char === closer) {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          value: source.slice(startIndex, i + 1),
+          endIndex: i,
+        };
+      }
+    }
   }
+
+  return null;
+}
+
+function parseJsonLoose<T>(raw: string): T {
+  const cleaned = extractJsonBlock(raw).trim();
+  const direct = tryParseJson<T>(cleaned);
+  if (direct !== null) return direct;
+
+  for (let i = 0; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (char !== '{' && char !== '[') continue;
+
+    const candidate = extractBalancedJsonCandidate(cleaned, i);
+    if (!candidate) continue;
+
+    const parsed = tryParseJson<T>(candidate.value);
+    if (parsed !== null) {
+      return parsed;
+    }
+
+    i = candidate.endIndex;
+  }
+
+  throw new Error('Could not parse JSON response from model');
 }
 
 function serialiseCourses(courses: CourseProgram[]): string {
@@ -282,8 +502,16 @@ function normaliseBrief(
   parsed: Record<string, unknown>,
   index: number,
   difficultyRange: [number, number],
+  durationRangeWeeks: [number, number],
 ): ProjectBrief {
   const rawMilestones = Array.isArray(parsed.milestones) ? parsed.milestones : [];
+  const today = startOfLocalDay();
+  const maxDueOffsetDays = Math.max(7, durationRangeWeeks[1] * 7);
+  const defaultSpacingDays = Math.max(
+    3,
+    Math.round(maxDueOffsetDays / Math.max(rawMilestones.length, 1)),
+  );
+  let previousOffset = 0;
 
   const milestones: Milestone[] = rawMilestones.map((m, i) => {
     const entry = (m ?? {}) as Record<string, unknown>;
@@ -292,11 +520,33 @@ function normaliseBrief(
       difficultyRange[0],
       difficultyRange[1],
     );
+
+    const parsedDue = parseDateOnly(entry.dueDate);
+    const rawOffsetDays = parsedDue
+      ? Math.floor((startOfLocalDay(parsedDue).getTime() - today.getTime()) / DAY_MS)
+      : Number.NaN;
+
+    let dueOffsetDays = Number.isFinite(rawOffsetDays)
+      ? Number(rawOffsetDays)
+      : (i + 1) * defaultSpacingDays;
+
+    if (dueOffsetDays < 1) {
+      dueOffsetDays = (i + 1) * defaultSpacingDays;
+    }
+
+    dueOffsetDays = clamp(Math.round(dueOffsetDays), 1, maxDueOffsetDays);
+    if (dueOffsetDays <= previousOffset) {
+      const minStep = Math.max(2, Math.floor(defaultSpacingDays / 2));
+      dueOffsetDays = Math.min(maxDueOffsetDays, previousOffset + minStep);
+      if (dueOffsetDays <= previousOffset) dueOffsetDays = previousOffset + 1;
+    }
+    previousOffset = dueOffsetDays;
+
     return {
       id: String(entry.id ?? `ms-${i + 1}`),
       title: String(entry.title ?? `Milestone ${i + 1}`),
       description: String(entry.description ?? ''),
-      dueDate: String(entry.dueDate ?? todayPlusDays((i + 1) * 7)),
+      dueDate: formatDateOnly(addDays(today, dueOffsetDays)),
       status: i === 0 ? 'in-progress' : 'upcoming',
       estimatedHours: clamp(Number(entry.estimatedHours) || 8, 2, 80),
       deliverables: Array.isArray(entry.deliverables)
@@ -447,6 +697,8 @@ async function generateBriefBatchCandidates(
 
   const [difficultyMin, difficultyMax] = request.difficultyRange;
   const [durationMinWeeks, durationMaxWeeks] = request.durationRangeWeeks;
+  const todayDate = formatDateOnly(startOfLocalDay());
+  const latestDueDate = formatDateOnly(addDays(startOfLocalDay(), durationMaxWeeks * 7 + 7));
 
   const systemPrompt = `You design project-based learning plans for engineering students.
 Return only valid JSON.
@@ -467,6 +719,8 @@ Quality rules:
 4) Respect difficulty range ${difficultyMin}-${difficultyMax} and duration range ${durationMinWeeks}-${durationMaxWeeks} weeks.
 5) Use only student-centric context (course progress + student submissions/feedback signals). Do not rely on assignment instructions or teacher resources.
 6) Include milestone rationale and skill coverage.
+7) Every milestone dueDate must be between ${todayDate} and ${latestDueDate} (inclusive).
+8) Milestone due dates must be chronological (non-decreasing by milestone order).
 
 Each array item schema:
 {
@@ -498,6 +752,7 @@ Each array item schema:
   const userPrompt = `Student: ${student.name} (${student.studentId}), GPA ${student.gpa}
 Requested project count: ${request.projectCount}
 Custom prompt: ${request.customPrompt?.trim() || 'none'}
+Today date: ${todayDate}
 
 Skill priorities:
 ${prioritySkills}
@@ -531,7 +786,14 @@ Output the JSON array only.`;
 
   return arrayPayload
     .filter((item) => item && typeof item === 'object')
-    .map((item, index) => normaliseBrief(item as Record<string, unknown>, index, request.difficultyRange));
+    .map((item, index) =>
+      normaliseBrief(
+        item as Record<string, unknown>,
+        index,
+        request.difficultyRange,
+        request.durationRangeWeeks,
+      ),
+    );
 }
 
 async function validateCandidatesBatch(
@@ -716,11 +978,20 @@ export async function generateProjectCandidates(
     };
   });
 
-  return enriched.sort(
+  const ranked = enriched.sort(
     (a, b) =>
       verdictOrder(a.validation.verdict) - verdictOrder(b.validation.verdict) ||
       b.validation.score - a.validation.score,
   );
+
+  const preferred = ranked.filter((c) => c.validation.verdict !== 'rejected');
+  const rejected = ranked.filter((c) => c.validation.verdict === 'rejected');
+  const limited = preferred.slice(0, targetCount);
+  if (limited.length < targetCount) {
+    limited.push(...rejected.slice(0, targetCount - limited.length));
+  }
+
+  return limited;
 }
 
 // Backward-compatible single-project generation
